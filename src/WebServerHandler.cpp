@@ -37,6 +37,12 @@ static WebServer server(WEBSERIAL_HTTP_PORT);
 static WebSocketsServer webSocket(WEBSERIAL_WS_PORT);
 static bool webStarted = false;
 static bool mdnsStarted = false;
+static unsigned long lastMdnsTry = 0;
+
+// How often the mDNS advertisement is retried while it has not succeeded yet.
+#ifndef WEBSERIAL_MDNS_RETRY_MS
+#define WEBSERIAL_MDNS_RETRY_MS 5000
+#endif
 
 static IPAddress consoleIP() {
     if (WiFi.status() == WL_CONNECTED) return WiFi.localIP();
@@ -57,6 +63,34 @@ static void reportReady() {
 
     WebSerial.logLine(WebSerialConsole::Source::DEBUG,
                       "[WebSerial] Console ready at " + url + " (" + ip.toString() + ")");
+}
+
+// The sketch may bring the network up after the console was started, e.g. a
+// non-blocking WiFi.begin(). The mDNS advertisement is retried until it
+// succeeds, so the hostname works no matter when the network appears.
+static void retryMdns() {
+#ifndef WEBSERIAL_DISABLE_MDNS
+    if (mdnsStarted) return;
+
+    // The console is reachable as soon as the board has a network: either an
+    // associated station or its own access point.
+    wifi_mode_t mode = WiFi.getMode();
+    bool netUp = (WiFi.status() == WL_CONNECTED) ||
+                 (mode == WIFI_MODE_AP) || (mode == WIFI_MODE_APSTA);
+    if (!netUp) return;
+
+    unsigned long now = millis();
+    if (now - lastMdnsTry < WEBSERIAL_MDNS_RETRY_MS) return;
+    lastMdnsTry = now;
+
+    if (!MDNS.begin(WEBSERIAL_MDNS_HOSTNAME)) return;
+
+    mdnsStarted = true;
+    MDNS.addService("http", "tcp", WEBSERIAL_HTTP_PORT);
+    WebSerial.logLine(WebSerialConsole::Source::DEBUG,
+                      "[WebSerial] Console ready at http://" +
+                      String(WEBSERIAL_MDNS_HOSTNAME) + ".local");
+#endif
 }
 
 void WebSerialDetail::startWeb() {
@@ -101,7 +135,9 @@ void WebSerialDetail::startWeb() {
 }
 
 void WebSerialDetail::handleWeb() {
-    if (webStarted) server.handleClient();
+    if (!webStarted) return;
+    server.handleClient();
+    retryMdns();
 }
 
 bool WebSerialDetail::connectWiFi(const char* ssid, const char* password,

@@ -1,6 +1,6 @@
 {
     "name": "WebSerialConsole",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "description": "Drop-in browser serial console for ESP32: one-call WiFi/mDNS setup, WebSocket bridge to the hardware serial port, source-tagged and colour-coded output with scrollback replay and built-in commands.",
     "keywords": [
         "esp32",
