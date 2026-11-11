@@ -858,9 +858,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   });
 
   // Load the source definitions and open the WebSocket in parallel: the
-  // console must come up even when the HTTP request is slow or blocked.
+  // console must come up even when an HTTP request is slow or blocked.
   document.head.appendChild(sourceStyle);
-  loadConfig().then(loadSources);
+  loadConfig();
+  loadSources();
   connect();
 })();
 </script>
