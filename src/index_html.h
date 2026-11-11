@@ -6,7 +6,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32-C3 Serial Console</title>
+<title>Web Serial Console</title>
 <style>
   :root {
     --bg-primary: #0f111a;
@@ -21,12 +21,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     --status-green: #10b981;
     --status-red: #ef4444;
     --status-yellow: #f59e0b;
-    --cmd-color: #38bdf8;
     --sys-color: #a78bfa;
-    --ha-color: #c084fc;
-    --slave-color: #34d399;
-    --master-color: #fbbf24;
-    --debug-color: #94a3b8;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   }
 
@@ -225,31 +220,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     background: var(--border-color);
   }
 
-  /* Source categories */
-  .line-ha {
-    color: var(--ha-color);
-  }
-
-  .line-user {
-    color: var(--cmd-color);
-    font-weight: 600;
-  }
-
-  .line-slave {
-    color: var(--slave-color);
-  }
-
-  .line-master {
-    color: var(--master-color);
-  }
-
-  .line-debug {
-    color: var(--debug-color);
-  }
-
+  /* Source categories: the line colours are generated at page load from the
+     source definitions the firmware serves on /sources, so a sketch can use
+     any sources and colours it likes. */
   .line-sys {
     color: var(--sys-color);
     font-style: italic;
+  }
+
+  .line-prompt {
+    font-weight: 600;
   }
 
   .src-tag {
@@ -268,20 +248,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     user-select: none;
   }
 
-  .tag-ha { color: var(--ha-color); }
-  .tag-user { color: var(--cmd-color); }
-  .tag-slave { color: var(--slave-color); }
-  .tag-master { color: var(--master-color); }
-  .tag-debug { color: var(--debug-color); }
-
-  /* Source visibility filters */
-  #terminal.hide-ha .src-ha,
-  #terminal.hide-user .src-user,
-  #terminal.hide-slave .src-slave,
-  #terminal.hide-master .src-master,
-  #terminal.hide-debug .src-debug {
-    display: none;
-  }
+  /* Source visibility filters: the hide-* and colour rules are generated per
+     registered source at page load. */
 
   .filter-chip {
     display: inline-flex;
@@ -310,11 +278,11 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     background-color: rgba(255, 255, 255, 0.06);
   }
 
-  .filter-ha { color: var(--ha-color); }
-  .filter-user { color: var(--cmd-color); }
-  .filter-slave { color: var(--slave-color); }
-  .filter-master { color: var(--master-color); }
-  .filter-debug { color: var(--debug-color); }
+  .source-filters {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
 
   .timestamp {
     color: var(--text-muted);
@@ -436,7 +404,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 <header>
   <div class="title-group">
     <div class="title-icon">>_</div>
-    <h1>ESP32-C3 Serial Console</h1>
+    <h1>Web Serial Console</h1>
     <div id="statusBadge" class="status-badge connecting">
       <span class="status-dot"></span>
       <span id="statusText">Connecting...</span>
@@ -444,7 +412,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   </div>
 
   <div class="controls-group">
-    <span class="badge-info">115200 baud</span>
+    <span class="badge-info" id="hostBadge"></span>
     <label class="toggle-label">
       <input type="checkbox" id="autoscrollCb" checked> Auto-scroll
     </label>
@@ -463,21 +431,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 
 <div class="macro-bar">
   <span class="macro-label">Sources:</span>
-  <label class="filter-chip filter-ha active" title="Home Assistant requests">
-    <input type="checkbox" id="fHa" checked>HA
-  </label>
-  <label class="filter-chip filter-user active" title="Commands typed in the console">
-    <input type="checkbox" id="fUser" checked>CMD
-  </label>
-  <label class="filter-chip filter-master active" title="RS485 commands sent by this master">
-    <input type="checkbox" id="fMaster" checked>MST
-  </label>
-  <label class="filter-chip filter-slave active" title="RS485 slave responses">
-    <input type="checkbox" id="fSlave" checked>SLV
-  </label>
-  <label class="filter-chip filter-debug active" title="Firmware debug prints">
-    <input type="checkbox" id="fDebug" checked>DBG
-  </label>
+  <span id="sourceFilters" class="source-filters"></span>
   <span class="macro-label" style="margin-left:12px">Quick cmds:</span>
   <button class="pill-btn" onclick="sendCommand('help')">help</button>
   <button class="pill-btn" onclick="sendCommand('ip')">ip</button>
@@ -512,9 +466,22 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   const MAX_LINES = 2500;
 
   // Tagged-line protocol: 0x01 <tag> <text> '\n'
-  const SOURCE_TAGS = { H: 'ha', U: 'user', S: 'slave', D: 'debug', M: 'master' };
-  const SOURCE_LABELS = { ha: 'HA', user: 'CMD', slave: 'SLV', debug: 'DBG', master: 'MST' };
+  // The tag -> source mapping, the labels and the colours are all reported by
+  // the firmware (pushed over the WebSocket and served from /sources), so
+  // nothing application-specific is hardcoded here.
+  const SOURCE_CONFIG = {};   // id -> { id, tag, label, color, title, prompt }
+  const SOURCE_TAGS = {};     // tag character -> id
+  const FALLBACK_SOURCES = [
+    { id: 'debug', tag: 'D', label: 'DBG', color: '#94a3b8', title: 'Output', prompt: false }
+  ];
+  const sourceStyle = document.createElement('style');
+  const filterState = {};     // source id -> chip state, kept across rebuilds
   let rxBuffer = '';
+
+  // Runtime configuration served by the firmware. The WebSocket port is not
+  // hardcoded in this page, so the library can be moved to another port
+  // without rebuilding the UI.
+  const CONFIG = { wsPort: 81, wsPath: '/' };
 
   const terminal = document.getElementById('terminal');
   const statusBadge = document.getElementById('statusBadge');
@@ -527,13 +494,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   const clearBtn = document.getElementById('clearBtn');
   const exportBtn = document.getElementById('exportBtn');
   const sendBtn = document.getElementById('sendBtn');
-  const filterCbs = {
-    ha: document.getElementById('fHa'),
-    user: document.getElementById('fUser'),
-    master: document.getElementById('fMaster'),
-    slave: document.getElementById('fSlave'),
-    debug: document.getElementById('fDebug')
-  };
+  const filterCbs = {};       // source id -> filter checkbox
+  const sourceFilters = document.getElementById('sourceFilters');
+  const hostBadge = document.getElementById('hostBadge');
+
+  hostBadge.textContent = location.host;
+  hostBadge.title = 'Console address';
 
   function getTimestamp() {
     const d = new Date();
@@ -565,6 +531,14 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     });
   }
 
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
   function appendSpan(htmlContent, className = '') {
     const span = document.createElement('span');
     if (className) span.className = className;
@@ -577,15 +551,19 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   function appendSourceLine(src, text) {
     if (!atLineStart) appendSpan('\n');
 
-    // User commands are shown with a prompt, whether they were typed in the
-    // web console or on the physical USB serial console.
-    const body = (src === 'user') ? ('> ' + text) : text;
+    const config = SOURCE_CONFIG[src] || FALLBACK_SOURCES[0];
+
+    // Sources flagged as prompt (the console input) are shown with '> ',
+    // whether the command was typed in the browser or on the USB console.
+    const body = config.prompt ? ('> ' + text) : text;
 
     const ts = timestampsCb.checked
       ? `<span class="timestamp">${getTimestamp()}</span>`
       : '';
-    const tag = `<span class="src-tag tag-${src}">${SOURCE_LABELS[src]}</span>`;
-    appendSpan(ts + tag + ' ' + ansiToHtml(body) + '\n', `line-${src} src-${src}`);
+    const tag = `<span class="src-tag">${escapeHtml(config.label)}</span>`;
+    const promptClass = config.prompt ? ' line-prompt' : '';
+    appendSpan(ts + tag + ' ' + ansiToHtml(body) + '\n',
+               `line-${src} src-${src}${promptClass}`);
     atLineStart = true;
   }
 
@@ -597,10 +575,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
       const raw = rxBuffer.slice(0, nl);
       rxBuffer = rxBuffer.slice(nl + 1);
 
+      // 0x02 <json> : the source table (ids, wire tags, labels, colours).
+      if (raw.charCodeAt(0) === 2) {
+        applySourceTable(raw.slice(1));
+        continue;
+      }
+
       let src = 'debug';
       let text = raw;
       if (raw.charCodeAt(0) === 1 && raw.length >= 2) {
-        src = SOURCE_TAGS[raw[1]] || 'debug';
+        src = SOURCE_TAGS[raw[1]] || unknownSource(raw[1]);
         text = raw.slice(2);
       }
 
@@ -611,12 +595,108 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     if (rxBuffer.length > 8192) rxBuffer = '';
   }
 
+  // A tag the firmware reported but this page does not know yet, e.g. a
+  // source registered after the page was loaded. Show it with a neutral badge
+  // instead of hiding it behind another source.
+  function unknownSource(tag) {
+    const id = 'tag' + tag.charCodeAt(0);
+    if (!SOURCE_CONFIG[id]) {
+      SOURCE_CONFIG[id] = {
+        id: id, tag: tag, label: tag, color: '#94a3b8',
+        title: 'Unregistered source', prompt: false
+      };
+    }
+    return id;
+  }
+
+  function applySourceTable(json) {
+    try {
+      const sources = JSON.parse(json);
+      if (Array.isArray(sources) && sources.length) {
+        buildSourceUi(sources);
+      }
+    } catch (e) {
+      // Keep the definitions we already have.
+    }
+  }
+
   function applySourceFilters() {
     for (const [src, cb] of Object.entries(filterCbs)) {
       if (!cb) continue;
       terminal.classList.toggle('hide-' + src, !cb.checked);
       const chip = cb.closest('.filter-chip');
       if (chip) chip.classList.toggle('active', cb.checked);
+    }
+  }
+
+  // Build the terminal styling, filter chips and tag mapping from the source
+  // definitions served by the firmware.
+  function buildSourceUi(sources) {
+    let css = '';
+
+    sourceFilters.innerHTML = '';
+
+    // Drop the previous definitions, but remember the chip states so a
+    // refresh does not re-enable filters the user switched off.
+    for (const id of Object.keys(filterCbs)) {
+      filterState[id] = filterCbs[id].checked;
+    }
+    for (const id of Object.keys(SOURCE_CONFIG)) delete SOURCE_CONFIG[id];
+    for (const tag of Object.keys(SOURCE_TAGS)) delete SOURCE_TAGS[tag];
+    for (const id of Object.keys(filterCbs)) delete filterCbs[id];
+
+    for (const source of sources) {
+      SOURCE_CONFIG[source.id] = source;
+      SOURCE_TAGS[source.tag] = source.id;
+
+      css += `.line-${source.id} { color: ${source.color}; }\n`;
+      css += `.filter-${source.id} { color: ${source.color}; }\n`;
+      css += `#terminal.hide-${source.id} .src-${source.id} { display: none; }\n`;
+
+      const chip = document.createElement('label');
+      chip.className = `filter-chip filter-${source.id}`;
+      chip.title = source.title || source.label;
+
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = filterState[source.id] !== false;
+      input.addEventListener('change', applySourceFilters);
+
+      chip.appendChild(input);
+      chip.appendChild(document.createTextNode(source.label));
+      sourceFilters.appendChild(chip);
+
+      filterCbs[source.id] = input;
+    }
+
+    sourceStyle.textContent = css;
+    applySourceFilters();
+  }
+
+  async function loadSources() {
+    try {
+      const response = await fetch('/sources', { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const sources = await response.json();
+      buildSourceUi(Array.isArray(sources) && sources.length ? sources : FALLBACK_SOURCES);
+    } catch (e) {
+      // Only fall back when nothing has been reported yet: the firmware
+      // pushes the table over the WebSocket as well.
+      if (!Object.keys(SOURCE_CONFIG).length) buildSourceUi(FALLBACK_SOURCES);
+    }
+  }
+
+  // Read the runtime configuration (WebSocket port and path). Falls back to
+  // the defaults when the request fails.
+  async function loadConfig() {
+    try {
+      const response = await fetch('/config', { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const cfg = await response.json();
+      if (cfg && cfg.wsPort) CONFIG.wsPort = cfg.wsPort;
+      if (cfg && cfg.wsPath) CONFIG.wsPath = cfg.wsPath;
+    } catch (e) {
+      // Keep the defaults.
     }
   }
 
@@ -648,7 +728,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = location.hostname || '127.0.0.1';
-    const wsUrl = `${protocol}//${host}:81/`;
+    const wsUrl = `${protocol}//${host}:${CONFIG.wsPort}${CONFIG.wsPath}`;
 
     try {
       ws = new WebSocket(wsUrl);
@@ -661,6 +741,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
       rxBuffer = '';
       updateStatus('connected', 'Connected');
       appendSystemLine(`[WebSocket connected to ${wsUrl}]`);
+      // The firmware pushes the source table right after the connection. Fetch
+      // it as well, so a reconnect also picks up sources that were registered
+      // in the meantime.
+      loadSources();
     };
 
     ws.onmessage = (event) => {
@@ -731,11 +815,6 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     }
   };
 
-  for (const cb of Object.values(filterCbs)) {
-    if (cb) cb.addEventListener('change', applySourceFilters);
-  }
-  applySourceFilters();
-
   exportBtn.onclick = () => {
     // textContent includes filtered-out lines, so the log stays complete.
     const text = terminal.textContent;
@@ -778,6 +857,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     }
   });
 
+  // Load the source definitions and open the WebSocket in parallel: the
+  // console must come up even when the HTTP request is slow or blocked.
+  document.head.appendChild(sourceStyle);
+  loadConfig().then(loadSources);
   connect();
 })();
 </script>

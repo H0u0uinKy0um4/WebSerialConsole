@@ -1,32 +1,167 @@
 #include "WebServerHandler.h"
+
 #include <Arduino.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
+#include <WiFi.h>
+#include <cstring>
+
+#ifndef WEBSERIAL_DISABLE_MDNS
+#include <ESPmDNS.h>
+#endif
+
+// NO_WEB_SERIAL_REDEFINE keeps `Serial` pointing at the real hardware port in
+// this translation unit. Library internals talk to the console explicitly.
+#define NO_WEB_SERIAL_REDEFINE
 #include "WebSerialConsole.h"
 #include "index_html.h"
 
-static WebServer server(80);
-static WebSocketsServer webSocket(81);
+// Hostname used for mDNS discovery. Override with a build flag when several
+// boards are on the same network.
+#ifndef WEBSERIAL_MDNS_HOSTNAME
+#define WEBSERIAL_MDNS_HOSTNAME "webserial"
+#endif
 
-void setupWebServer() {
+// Port the WebSocket server listens on. The browser learns the real value
+// from GET /config, so it can be changed without touching the web page.
+#ifndef WEBSERIAL_WS_PORT
+#define WEBSERIAL_WS_PORT 81
+#endif
+
+// Port the HTTP server listens on.
+#ifndef WEBSERIAL_HTTP_PORT
+#define WEBSERIAL_HTTP_PORT 80
+#endif
+
+static WebServer server(WEBSERIAL_HTTP_PORT);
+static WebSocketsServer webSocket(WEBSERIAL_WS_PORT);
+static bool webStarted = false;
+static bool mdnsStarted = false;
+
+static IPAddress consoleIP() {
+    if (WiFi.status() == WL_CONNECTED) return WiFi.localIP();
+    return WiFi.softAPIP();
+}
+
+static void reportReady() {
+    IPAddress ip = consoleIP();
+    String url = "http://" + ip.toString();
+
+#ifndef WEBSERIAL_DISABLE_MDNS
+    if (!mdnsStarted && MDNS.begin(WEBSERIAL_MDNS_HOSTNAME)) {
+        mdnsStarted = true;
+        MDNS.addService("http", "tcp", WEBSERIAL_HTTP_PORT);
+        url = "http://" + String(WEBSERIAL_MDNS_HOSTNAME) + ".local";
+    }
+#endif
+
+    WebSerial.logLine(WebSerialConsole::Source::DEBUG,
+                      "[WebSerial] Console ready at " + url + " (" + ip.toString() + ")");
+}
+
+void WebSerialDetail::startWeb() {
+    if (webStarted) return;
+    webStarted = true;
+
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
     });
 
+    // Source definitions (ids, tags, labels, colours) for the embedded UI.
+    server.on("/sources", HTTP_GET, []() {
+        server.send(200, "application/json", WebSerial.sourcesJson());
+    });
+
+    // Runtime configuration the web page needs: the WebSocket port and the
+    // path it is served on. Fetched before the socket is opened so the port
+    // never has to be hardcoded in the page.
+    server.on("/config", HTTP_GET, []() {
+        String cfg = "{\"wsPort\":";
+        cfg += WEBSERIAL_WS_PORT;
+        cfg += ",\"wsPath\":\"/\"";
+        cfg += ",\"mdns\":\"";
+#ifndef WEBSERIAL_DISABLE_MDNS
+        cfg += WEBSERIAL_MDNS_HOSTNAME;
+#endif
+        cfg += "\"}";
+        server.send(200, "application/json", cfg);
+    });
+
     server.onNotFound([]() {
-        Serial.print("Unknown HTTP request: ");
-        Serial.println(server.uri());
+        WebSerialDetail::getHWSerial().print("Unknown HTTP request: ");
+        WebSerialDetail::getHWSerial().println(server.uri());
         server.send(404, "text/plain", "Not found: " + server.uri());
     });
 
     server.begin();
     webSocket.begin();
     WebSerial.attachWebSocket(&webSocket);
-    Serial.print("Web Serial Console ready at: http://");
-    Serial.println(WiFi.localIP());
+
+    reportReady();
+}
+
+void WebSerialDetail::handleWeb() {
+    if (webStarted) server.handleClient();
+}
+
+bool WebSerialDetail::connectWiFi(const char* ssid, const char* password,
+                                   unsigned long timeoutMs) {
+    if (!ssid || !*ssid) return false;
+
+    WiFi.setSleep(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+        delay(50);
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        WebSerialDetail::getHWSerial().print("[WebSerial] Could not join \"");
+        WebSerialDetail::getHWSerial().print(ssid);
+        WebSerialDetail::getHWSerial().print("\" (status ");
+        WebSerialDetail::getHWSerial().print((int)WiFi.status());
+        WebSerialDetail::getHWSerial().println(")");
+        return false;
+    }
+
+    WebSerialDetail::getHWSerial().print("[WebSerial] Joined \"");
+    WebSerialDetail::getHWSerial().print(ssid);
+    WebSerialDetail::getHWSerial().print("\", IP ");
+    WebSerialDetail::getHWSerial().println(WiFi.localIP());
+    return true;
+}
+
+bool WebSerialDetail::startAccessPoint(const char* ssid, const char* password) {
+    if (!ssid || !*ssid) return false;
+
+    size_t passLen = password ? strlen(password) : 0;
+    if (passLen > 0 && passLen < 8) {
+        WebSerialDetail::getHWSerial().println("[WebSerial] AP password must be at least 8 characters");
+        return false;
+    }
+
+    WiFi.mode(WIFI_AP);
+    bool ok = passLen > 0 ? WiFi.softAP(ssid, password) : WiFi.softAP(ssid);
+    if (!ok) {
+        WebSerialDetail::getHWSerial().println("[WebSerial] Could not start the access point");
+        return false;
+    }
+
+    WebSerialDetail::getHWSerial().print("[WebSerial] Access point \"");
+    WebSerialDetail::getHWSerial().print(ssid);
+    WebSerialDetail::getHWSerial().print("\" up, IP ");
+    WebSerialDetail::getHWSerial().println(WiFi.softAPIP());
+    return true;
+}
+
+// Legacy entry points, kept so existing sketches keep working.
+void setupWebServer() {
+    WebSerial.beginWeb();
 }
 
 void handleWebServer() {
-    server.handleClient();
+    // loop() already serves HTTP, handles the WebSocket and pumps the serial.
     WebSerial.loop();
 }
