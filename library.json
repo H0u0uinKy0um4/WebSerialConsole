@@ -1,0 +1,43 @@
+{
+    "name": "WebSerialConsole",
+    "version": "1.0.0",
+    "description": "WebSocket serial console for ESP32: bridges WiFi WebSocket clients and the hardware USB serial console into one tagged terminal stream with scrollback replay and built-in commands.",
+    "keywords": [
+        "esp32",
+        "arduino",
+        "serial",
+        "console",
+        "websocket",
+        "web",
+        "iot",
+        "terminal"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "H0u0uinKy0um4",
+            "url": "https://github.com/H0u0uinKy0um4"
+        }
+    ],
+    "maintainer": {
+        "name": "H0u0uinKy0um4",
+        "url": "https://github.com/H0u0uinKy0um4"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/H0u0uinKy0um4/WebSerialConsole.git"
+    },
+    "frameworks": [
+        "arduino"
+    ],
+    "platforms": [
+        "espressif32"
+    ],
+    "dependencies": [
+        {
+            "name": "WebSockets",
+            "owner": "links2004",
+            "version": "^2.4.1"
+        }
+    ]
+}
